@@ -649,26 +649,46 @@ class PlateListFrame(ttk.Frame):
         base_url = f"http://{cam['ip']}:{cam['port']}" if cam['port'] else f"http://{cam['ip']}"
         fetched_plates = []
         
-        get_urls = [
-            f"{base_url}/ISAPI/Traffic/channels/1/vehicleDetect/plateRecog/whiteList",
-            f"{base_url}/ISAPI/Traffic/channels/1/vehicleDetect/plateRecog/blackWhiteList",
-            f"{base_url}/ISAPI/Traffic/plateList"
+        # Filtrelenecek başlık ve gereksiz ifadeler listesi
+        ignore_keywords = [
+            "effectiveenddate", "effectivestartdate", "group0blocklist", 
+            "plateno", "id", "licenseplate", "format"
         ]
+        
+        url = f"{base_url}/ISAPI/Traffic/channels/1/licensePlateAuditData?fileType=csv"
 
-        for url in get_urls:
-            try:
-                res = requests.get(url, auth=HTTPDigestAuth(cam['user'], cam['pass']), timeout=4)
-                if res.status_code == 200:
-                    root = ET.fromstring(res.content)
-                    for elem in root.iter():
-                        if elem.tag.endswith('plateNo') and elem.text:
-                            clean = self.controller.clean_plate(elem.text)
-                            if clean and clean not in fetched_plates:
+        try:
+            res = requests.get(url, auth=HTTPDigestAuth(cam['user'], cam['pass']), timeout=5)
+            if res.status_code == 200:
+                csv_content = res.content.decode('utf-8', errors='ignore')
+                
+                for line in csv_content.splitlines():
+                    # Satırı küçük harfe çevirip işle
+                    clean_line = line.strip().lower()
+                    
+                    # Başlık satırlarını ve tamamen gereksiz olanları atla
+                    if not line.strip() or any(key in clean_line for key in ignore_keywords):
+                        continue
+                        
+                    # CSV virgül veya noktalı virgül ile ayrılmış olabilir
+                    parts = [p.strip().strip('"') for p in line.replace(';', ',').split(',')]
+                    
+                    for part in parts:
+                        clean = self.controller.clean_plate(part)
+                        
+                        # Temel filtreleme:
+                        # 1. En az 5 karakter olsun
+                        # 2. Sadece sayılardan oluşmasın (çünkü ID'ler genellikle rakamdır)
+                        # 3. Yasaklı kelimeleri içermesin
+                        if clean and len(clean) >= 5 and not clean.isdigit():
+                            if clean not in fetched_plates:
                                 fetched_plates.append(clean)
-                    if fetched_plates:
-                        return True, cam['ip'], fetched_plates
-            except Exception:
-                pass
+                                
+                if fetched_plates:
+                    return True, cam['ip'], fetched_plates
+                    
+        except Exception as e:
+            print(f"[FETCH CSV HATA] IP: {cam['ip']} | Detay: {e}")
 
         return False, cam['ip'], []
 
@@ -736,14 +756,14 @@ class PlateListFrame(ttk.Frame):
         base_url = f"http://{cam['ip']}:{cam['port']}" if cam['port'] else f"http://{cam['ip']}"
         headers = {'Content-Type': 'application/json'}
 
-        # Postman'de başarılı olduğunuz ISAPI beyaz liste uç noktası
+        # Doğrulanmış tam URL uç noktaları (Önce Postman'de test ettiğiniz kayıt endpoint'i denenecek)
         urls = [
-            f"{base_url}/ISAPI/Traffic/channels/1/recognition/blacklist/whiteList",
-            f"{base_url}/ISAPI/Traffic/channels/1/vehicleDetect/plateRecog/whiteList"
+            f"{base_url}/ISAPI/Traffic/channels/1/licensePlateAuditData/record?format=json",
+            f"{base_url}/ISAPI/Traffic/channels/1/licensePlateAuditData"
         ]
 
         for plate_no in plates:
-            # Postman'de test edip onayladığınız JSON şeması
+            # Postman'de başarılı olduğunuz JSON şeması
             json_payload = {
                 "LicensePlateInfoList": [
                     {
@@ -763,13 +783,13 @@ class PlateListFrame(ttk.Frame):
 
             for url in urls:
                 try:
-                    # PUT metodu kullanarak JSON verisini gönderiyoruz
+            # PUT metodu ile JSON gönderimi
                     res = requests.put(
                         url, 
                         json=json_payload, 
                         headers=headers, 
                         auth=HTTPDigestAuth(cam['user'], cam['pass']), 
-                        timeout=4
+                        timeout=5
                     )
                     last_status = res.status_code
                     last_resp_text = res.text
@@ -821,19 +841,53 @@ class PlateListFrame(ttk.Frame):
 
     def clear_single_camera_plates(self, cam):
         base_url = f"http://{cam['ip']}:{cam['port']}" if cam['port'] else f"http://{cam['ip']}"
-        urls = [
-            f"{base_url}/ISAPI/Traffic/channels/1/recognition/blacklist/whiteList",
-            f"{base_url}/ISAPI/Traffic/channels/1/vehicleDetect/plateRecog/whiteList",
-            f"{base_url}/ISAPI/Traffic/channels/1/vehicleDetect/plateRecog/blacklist",
-            f"{base_url}/ISAPI/Traffic/channels/1/vehicleDetect/plateRecog/blackWhiteList"
-        ]
-        for url in urls:
+        all_ids = []
+        page_no = 1
+        
+        # 1. ADIM: Tüm sayfaları gez ve tüm ID'leri topla
+        while True:
+            # Sayfalama parametresi ekliyoruz: maxResults=100, pageNo=page_no
+            get_url = f"{base_url}/ISAPI/Traffic/channels/1/licensePlateAuditData?format=json&maxResults=100&pageNo={page_no}"
             try:
-                res = requests.delete(url, auth=HTTPDigestAuth(cam['user'], cam['pass']), timeout=4)
-                if res.status_code in [200, 201]:
-                    return True, cam['ip']
-            except Exception:
-                pass
+                res = requests.get(get_url, auth=HTTPDigestAuth(cam['user'], cam['pass']), timeout=5)
+                if res.status_code != 200: break
+                
+                data = res.json()
+                items = data.get("LicensePlateInfoList", [])
+                if not items: break # Daha fazla kayıt yok
+                
+                # Mevcut sayfadaki ID'leri topla
+                for item in items:
+                    if "id" in item:
+                        all_ids.append(str(item["id"]))
+                
+                page_no += 1 # Sonraki sayfaya geç
+            except:
+                break
+        
+        if not all_ids:
+            return True, cam['ip'] # Zaten boş
+
+        # 2. ADIM: Toplanan tüm ID'leri toplu silme isteğine gönder
+        del_url = f"{base_url}/ISAPI/Traffic/channels/1/DelLicensePlateAuditData?format=json"
+        try:
+            # Kameranın toplu silme kapasitesini zorlamamak için 
+            # 100'lük gruplar halinde silmek daha güvenlidir
+            for i in range(0, len(all_ids), 100):
+                chunk = all_ids[i:i + 100]
+                res_del = requests.post(
+                    del_url, 
+                    json={"id": chunk}, 
+                    auth=HTTPDigestAuth(cam['user'], cam['pass']), 
+                    timeout=10
+                )
+                if res_del.status_code not in [200, 201]:
+                    return False, cam['ip']
+                    
+            return True, cam['ip']
+        except Exception as e:
+            print(f"[TEMİZLEME HATA] IP: {cam['ip']} | Detay: {e}")
+            
         return False, cam['ip']
 
     def finish_clear_plates(self, summary):
