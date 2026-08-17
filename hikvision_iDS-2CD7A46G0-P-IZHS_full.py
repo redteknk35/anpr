@@ -1,4 +1,4 @@
-import tkinter as tk
+aimport tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import requests
 from requests.auth import HTTPDigestAuth
@@ -841,53 +841,37 @@ class PlateListFrame(ttk.Frame):
 
     def clear_single_camera_plates(self, cam):
         base_url = f"http://{cam['ip']}:{cam['port']}" if cam['port'] else f"http://{cam['ip']}"
-        all_ids = []
-        page_no = 1
         
-        # 1. ADIM: Tüm sayfaları gez ve tüm ID'leri topla
-        while True:
-            # Sayfalama parametresi ekliyoruz: maxResults=100, pageNo=page_no
-            get_url = f"{base_url}/ISAPI/Traffic/channels/1/licensePlateAuditData?format=json&maxResults=100&pageNo={page_no}"
+        # Arayüzden yakaladığın doğru uç nokta
+        url = f"{base_url}/ISAPI/Traffic/channels/1/DelLicensePlateAuditData?format=json"
+        
+        # Yakaladığın doğru payload
+        payload = {
+            "id": [],
+            "deleteAllEnabled": True
+        }
+        
+        headers = {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json, text/javascript, */*'
+        }
+        
+        # Hikvision cihazlarda silme komutları PUT veya POST bekleyebilir, ikisini de deneyelim
+        for method in [requests.put, requests.post]:
             try:
-                res = requests.get(get_url, auth=HTTPDigestAuth(cam['user'], cam['pass']), timeout=5)
-                if res.status_code != 200: break
-                
-                data = res.json()
-                items = data.get("LicensePlateInfoList", [])
-                if not items: break # Daha fazla kayıt yok
-                
-                # Mevcut sayfadaki ID'leri topla
-                for item in items:
-                    if "id" in item:
-                        all_ids.append(str(item["id"]))
-                
-                page_no += 1 # Sonraki sayfaya geç
-            except:
-                break
-        
-        if not all_ids:
-            return True, cam['ip'] # Zaten boş
-
-        # 2. ADIM: Toplanan tüm ID'leri toplu silme isteğine gönder
-        del_url = f"{base_url}/ISAPI/Traffic/channels/1/DelLicensePlateAuditData?format=json"
-        try:
-            # Kameranın toplu silme kapasitesini zorlamamak için 
-            # 100'lük gruplar halinde silmek daha güvenlidir
-            for i in range(0, len(all_ids), 100):
-                chunk = all_ids[i:i + 100]
-                res_del = requests.post(
-                    del_url, 
-                    json={"id": chunk}, 
+                res = method(
+                    url, 
+                    json=payload, 
+                    headers=headers, 
                     auth=HTTPDigestAuth(cam['user'], cam['pass']), 
                     timeout=10
                 )
-                if res_del.status_code not in [200, 201]:
-                    return False, cam['ip']
-                    
-            return True, cam['ip']
-        except Exception as e:
-            print(f"[TEMİZLEME HATA] IP: {cam['ip']} | Detay: {e}")
-            
+                
+                if res.status_code in [200, 201]:
+                    return True, cam['ip']
+            except Exception as e:
+                continue
+                
         return False, cam['ip']
 
     def finish_clear_plates(self, summary):
