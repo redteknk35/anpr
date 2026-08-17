@@ -1,4 +1,4 @@
-aimport tkinter as tk
+import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import requests
 from requests.auth import HTTPDigestAuth
@@ -9,6 +9,7 @@ import io
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
+import sqlite3
 
 class HikvisionANPRApp:
     def __init__(self, root):
@@ -16,6 +17,9 @@ class HikvisionANPRApp:
         self.root.title("Red Güvenlik iDS-2CD7A46G0 Plaka Yönetici Yavuz KULAS")
         self.root.geometry("880x860")
         self.root.minsize(800, 800)
+
+        # --- SQLITE VERİTABANI BAŞLANGICI ---
+        self.init_db()
 
         # Tema Durumu (True: Koyu Tema, False: Açık Tema)
         self.is_dark_theme = True
@@ -79,6 +83,24 @@ class HikvisionANPRApp:
 
         # Başlangıçta Kamera Yönetimi ekranını aç
         self.show_camera_management()
+
+    def init_db(self):
+        """Uygulama klasöründe cameras.db veritabanını ve tablosunu oluşturur."""
+        try:
+            self.conn = sqlite3.connect("cameras.db")
+            self.cursor = self.conn.cursor()
+            self.cursor.execute("""
+                CREATE TABLE IF NOT EXISTS cameras (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ip TEXT NOT NULL,
+                    port TEXT,
+                    user TEXT,
+                    password TEXT
+                )
+            """)
+            self.conn.commit()
+        except Exception as e:
+            print(f"[VERİTABANI HATA] {e}")
 
     def show_frame(self, frame_name):
         frame = self.frames[frame_name]
@@ -269,8 +291,8 @@ class CameraManagementFrame(ttk.Frame):
         self.lbl_conn_status = tk.Label(frame_left, text="● Henüz Bağlanılmadı", bg=controller.card_bg, fg="gray", font=("Arial", 9, "bold"))
         self.lbl_conn_status.pack(pady=5)
 
-        # Öntanımlı örnek kamera
-        self.tree_cams.insert("", "end", values=("1", "192.168.1.64", "80", "admin", ""), tags=("red_led",))
+        # --- SQLite Veritabanından Kayıtları Yükle ---
+        self.load_cameras_from_db()
 
         # Sağ / Alt Alan: Canlı Önizleme
         self.frame_preview = ttk.LabelFrame(self, text="Canlı Kamera Önizleme", padding=10)
@@ -293,6 +315,40 @@ class CameraManagementFrame(ttk.Frame):
     def apply_theme(self):
         self.lbl_image.config(bg=self.controller.img_bg_color, fg=self.controller.img_fg_color)
         self.lbl_conn_status.config(bg=self.controller.card_bg)
+
+    def load_cameras_from_db(self):
+        """Veritabanındaki kameraları okur ve arayüze yükler. Boşsa varsayılan ekler."""
+        try:
+            self.controller.cursor.execute("SELECT ip, port, user, password FROM cameras")
+            rows = self.controller.cursor.fetchall()
+            
+            if rows:
+                for row in rows:
+                    ip, port, user, pwd = row
+                    new_no = str(len(self.tree_cams.get_children()) + 1)
+                    self.tree_cams.insert("", "end", values=(new_no, ip, port, user, pwd), tags=("red_led",))
+            else:
+                self.tree_cams.insert("", "end", values=("1", "192.168.1.64", "80", "admin", ""), tags=("red_led",))
+                self.save_all_cameras_to_db()
+                
+            self.refresh_camera_numbers()
+        except Exception as e:
+            print(f"[DB YÜKLEME HATA] {e}")
+
+    def save_all_cameras_to_db(self):
+        """Arayüzdeki tüm kameraları veritabanına baştan kaydeder."""
+        try:
+            self.controller.cursor.execute("DELETE FROM cameras")
+            for item in self.tree_cams.get_children():
+                vals = self.tree_cams.item(item, "values")
+                ip, port, user, pwd = vals[1], vals[2], vals[3], vals[4]
+                self.controller.cursor.execute(
+                    "INSERT INTO cameras (ip, port, user, password) VALUES (?, ?, ?, ?)",
+                    (ip, port, user, pwd)
+                )
+            self.controller.conn.commit()
+        except Exception as e:
+            print(f"[DB KAYDETME HATA] {e}")
 
     def refresh_camera_numbers(self):
         for index, item in enumerate(self.tree_cams.get_children(), start=1):
@@ -336,6 +392,9 @@ class CameraManagementFrame(ttk.Frame):
             self.clear_form()
             self.refresh_camera_numbers()
 
+        # Değişiklikleri veritabanına kaydet
+        self.save_all_cameras_to_db()
+
     def on_tree_select(self, event=None):
         selected = self.tree_cams.selection()
         if selected:
@@ -378,6 +437,9 @@ class CameraManagementFrame(ttk.Frame):
             self.clear_form()
             self.refresh_camera_numbers()
             self.on_tree_select()
+            
+            # Değişiklikleri veritabanına kaydet
+            self.save_all_cameras_to_db()
 
     def get_selected_camera_list(self):
         selected = self.tree_cams.selection()
