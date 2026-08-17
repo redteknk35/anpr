@@ -717,8 +717,8 @@ class PlateListFrame(ttk.Frame):
         threading.Thread(target=self.upload_plates_parallel, args=(cams,), daemon=True).start()
 
     def upload_plates_parallel(self, cams):
-        start_date = self.entry_start.get().strip() if self.controller.use_date_var.get() else None
-        end_date = self.entry_end.get().strip() if self.controller.use_date_var.get() else None
+        start_date = self.entry_start.get().strip() if self.controller.use_date_var.get() else "2026-08-14"
+        end_date = self.entry_end.get().strip() if self.controller.use_date_var.get() else "2030-12-31"
         raw_text = self.txt_plates.get("1.0", tk.END).strip()
         plates = [self.controller.clean_plate(line) for line in raw_text.splitlines() if line.strip()]
 
@@ -734,55 +734,52 @@ class PlateListFrame(ttk.Frame):
     def send_plates_to_single_camera(self, cam, plates, start_date, end_date):
         success_count, fail_count = 0, 0
         base_url = f"http://{cam['ip']}:{cam['port']}" if cam['port'] else f"http://{cam['ip']}"
-        headers = {'Content-Type': 'application/xml'}
+        headers = {'Content-Type': 'application/json'}
 
+        # Postman'de başarılı olduğunuz ISAPI beyaz liste uç noktası
         urls = [
-            f"{base_url}/ISAPI/Traffic/channels/1/vehicleDetect/plateRecog/whiteList",
-            f"{base_url}/ISAPI/Traffic/channels/1/vehicleDetect/plateRecog/blackWhiteList",
-            f"{base_url}/ISAPI/Traffic/plateList"
+            f"{base_url}/ISAPI/Traffic/channels/1/recognition/blacklist/whiteList",
+            f"{base_url}/ISAPI/Traffic/channels/1/vehicleDetect/plateRecog/whiteList"
         ]
 
-        for idx, plate_no in enumerate(plates, start=1):
-            date_xml = f"\n    <startDate>{start_date}T00:00:00</startDate>\n    <endDate>{end_date}T23:59:59</endDate>" if start_date and end_date else ""
-            
-            xml_payloads = [
-                f"""<?xml version="1.0" encoding="UTF-8"?>
-<WhiteList version="2.0" xmlns="http://www.isapi.org/ver20/XMLSchema">
-    <id>{idx}</id>
-    <plateNo>{plate_no}</plateNo>{date_xml}
-</WhiteList>""",
-                f"""<?xml version="1.0" encoding="UTF-8"?>
-<TargetInfo version="2.0" xmlns="http://www.isapi.org/ver20/XMLSchema">
-    <plateNo>{plate_no}</plateNo>
-    <listType>white</listType>{date_xml}
-</TargetInfo>"""
-            ]
+        for plate_no in plates:
+            # Postman'de test edip onayladığınız JSON şeması
+            json_payload = {
+                "LicensePlateInfoList": [
+                    {
+                        "LicensePlate": plate_no,
+                        "listType": "whiteList",
+                        "createTime": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+                        "effectiveStartDate": start_date,
+                        "effectiveTime": end_date,
+                        "id": ""
+                    }
+                ]
+            }
 
             sent_ok = False
             last_status = None
             last_resp_text = ""
 
             for url in urls:
-                for xml_data in xml_payloads:
-                    try:
-                        for method in [requests.put, requests.post]:
-                            res = method(
-                                url, 
-                                data=xml_data.encode('utf-8'), 
-                                headers=headers, 
-                                auth=HTTPDigestAuth(cam['user'], cam['pass']), 
-                                timeout=4
-                            )
-                            last_status = res.status_code
-                            last_resp_text = res.text
-                            
-                            if res.status_code in [200, 201]:
-                                sent_ok = True
-                                break
-                        if sent_ok:
-                            break
-                    except Exception as ex:
-                        last_resp_text = str(ex)
+                try:
+                    # PUT metodu kullanarak JSON verisini gönderiyoruz
+                    res = requests.put(
+                        url, 
+                        json=json_payload, 
+                        headers=headers, 
+                        auth=HTTPDigestAuth(cam['user'], cam['pass']), 
+                        timeout=4
+                    )
+                    last_status = res.status_code
+                    last_resp_text = res.text
+                    
+                    if res.status_code in [200, 201]:
+                        sent_ok = True
+                        break
+                except Exception as ex:
+                    last_resp_text = str(ex)
+
                 if sent_ok:
                     break
             
@@ -825,6 +822,7 @@ class PlateListFrame(ttk.Frame):
     def clear_single_camera_plates(self, cam):
         base_url = f"http://{cam['ip']}:{cam['port']}" if cam['port'] else f"http://{cam['ip']}"
         urls = [
+            f"{base_url}/ISAPI/Traffic/channels/1/recognition/blacklist/whiteList",
             f"{base_url}/ISAPI/Traffic/channels/1/vehicleDetect/plateRecog/whiteList",
             f"{base_url}/ISAPI/Traffic/channels/1/vehicleDetect/plateRecog/blacklist",
             f"{base_url}/ISAPI/Traffic/channels/1/vehicleDetect/plateRecog/blackWhiteList"
@@ -842,7 +840,6 @@ class PlateListFrame(ttk.Frame):
         self.btn_clear.config(state="normal")
         self.controller.lbl_status.config(text="Silme işlemi tamamlandı.")
         messagebox.showinfo("İşlem Sonucu", "\n".join(summary))
-
 
 # --- 3. VCA EKRANI ---
 class VCAFrame(ttk.Frame):
