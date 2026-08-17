@@ -664,6 +664,10 @@ class PlateListFrame(ttk.Frame):
         self.btn_fetch = ttk.Button(frame_file_ops, text="📥 Kameralardaki Mevcut Plakaları Çek", command=self.start_fetch_plates_thread)
         self.btn_fetch.pack(side="left")
 
+        # Yeni Dışarı Aktar (Export) Butonu
+        btn_export = ttk.Button(frame_file_ops, text="💾 Listeyi Dışarı Aktar", command=self.export_to_file)
+        btn_export.pack(side="left", padx=5)
+
         btn_file = ttk.Button(frame_file_ops, text="📂 TXT / CSV Dosyasından Yükle", command=self.load_from_file)
         btn_file.pack(side="right")
 
@@ -684,6 +688,27 @@ class PlateListFrame(ttk.Frame):
         self.entry_start.config(state=state)
         self.entry_end.config(state=state)
 
+    def get_verified_active_cameras(self):
+        """Seçilen kameraların aktif (bağlantısı doğrulanmış) olup olmadığını kontrol eder."""
+        cam_frame = self.controller.frames["CameraManagementFrame"]
+        selected_cams = cam_frame.get_selected_camera_list()
+
+        if not selected_cams:
+            messagebox.showwarning("Eksik Bilgi", "Lütfen önce Kamera Yönetimi ekranından kamera seçin veya ekleyin.")
+            return []
+
+        active_cams = [cam for cam in selected_cams if cam['ip'] in self.controller.active_cameras]
+
+        if not active_cams:
+            messagebox.showwarning(
+                "Bağlantı Gerekli", 
+                "Seçilen kameralarla henüz aktif bir bağlantı kurulmamış!\n\n"
+                "Lütfen Kamera Yönetimi ekranından seçtiğiniz kameralara önce **'Bağlan & Test Et'** butonuna basarak bağlanın."
+            )
+            return []
+
+        return active_cams
+
     def load_from_file(self):
         file_path = filedialog.askopenfilename(filetypes=[("Text Files", "*.txt"), ("CSV Files", "*.csv"), ("All Files", "*.*")])
         if file_path:
@@ -695,23 +720,40 @@ class PlateListFrame(ttk.Frame):
             except Exception as e:
                 messagebox.showerror("Hata", f"Dosya okunamadı: {str(e)}")
 
-    def start_fetch_plates_thread(self):
-        cam_frame = self.controller.frames["CameraManagementFrame"]
-        cams = cam_frame.get_selected_camera_list()
+    def export_to_file(self):
+        raw_text = self.txt_plates.get("1.0", tk.END).strip()
+        if not raw_text:
+            messagebox.showwarning("Eksik Bilgi", "Dışarı aktarılacak plaka listesi boş.")
+            return
 
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".txt",
+            filetypes=[("Text Files", "*.txt"), ("CSV Files", "*.csv"), ("All Files", "*.*")],
+            title="Plaka Listesini Kaydet"
+        )
+        
+        if file_path:
+            try:
+                with open(file_path, "w", encoding="utf-8") as f:
+                    f.write(raw_text)
+                self.controller.lbl_status.config(text="Plaka listesi başarıyla kaydedildi.")
+                messagebox.showinfo("İşlem Başarılı", f"Liste başarıyla kaydedildi:\n{file_path}")
+            except Exception as e:
+                messagebox.showerror("Hata", f"Dosya kaydedilemedi: {str(e)}")
+
+    def start_fetch_plates_thread(self):
+        cams = self.get_verified_active_cameras()
         if not cams:
-            messagebox.showwarning("Eksik Bilgi", "Lütfen önce Kamera Yönetimi ekranından kamera seçin veya ekleyin.")
             return
 
         self.btn_fetch.config(state="disabled")
-        self.controller.lbl_status.config(text=f"{len(cams)} kameradan plaka verileri çekiliyor...")
+        self.controller.lbl_status.config(text=f"{len(cams)} aktif kameradan plaka verileri çekiliyor...")
         threading.Thread(target=self.fetch_all_camera_plates, args=(cams,), daemon=True).start()
 
     def fetch_single_camera_plates(self, cam):
         base_url = f"http://{cam['ip']}:{cam['port']}" if cam['port'] else f"http://{cam['ip']}"
         fetched_plates = []
         
-        # Filtrelenecek başlık ve gereksiz ifadeler listesi
         ignore_keywords = [
             "effectiveenddate", "effectivestartdate", "group0blocklist", 
             "plateno", "id", "licenseplate", "format"
@@ -725,23 +767,15 @@ class PlateListFrame(ttk.Frame):
                 csv_content = res.content.decode('utf-8', errors='ignore')
                 
                 for line in csv_content.splitlines():
-                    # Satırı küçük harfe çevirip işle
                     clean_line = line.strip().lower()
                     
-                    # Başlık satırlarını ve tamamen gereksiz olanları atla
                     if not line.strip() or any(key in clean_line for key in ignore_keywords):
                         continue
                         
-                    # CSV virgül veya noktalı virgül ile ayrılmış olabilir
                     parts = [p.strip().strip('"') for p in line.replace(';', ',').split(',')]
                     
                     for part in parts:
                         clean = self.controller.clean_plate(part)
-                        
-                        # Temel filtreleme:
-                        # 1. En az 5 karakter olsun
-                        # 2. Sadece sayılardan oluşmasın (çünkü ID'ler genellikle rakamdır)
-                        # 3. Yasaklı kelimeleri içermesin
                         if clean and len(clean) >= 5 and not clean.isdigit():
                             if clean not in fetched_plates:
                                 fetched_plates.append(clean)
@@ -782,11 +816,8 @@ class PlateListFrame(ttk.Frame):
             messagebox.showwarning("Sonuç", "Kameralarda kayıtlı plaka bulunamadı ya da uç nokta yanıt vermedi.")
 
     def start_upload_plates_thread(self):
-        cam_frame = self.controller.frames["CameraManagementFrame"]
-        cams = cam_frame.get_selected_camera_list()
-
+        cams = self.get_verified_active_cameras()
         if not cams:
-            messagebox.showwarning("Eksik Bilgi", "Lütfen önce Kamera Yönetimi ekranından kamera seçin.")
             return
 
         raw_text = self.txt_plates.get("1.0", tk.END).strip()
@@ -795,7 +826,7 @@ class PlateListFrame(ttk.Frame):
             return
 
         self.btn_upload.config(state="disabled")
-        self.controller.lbl_status.config(text=f"Plakalar {len(cams)} kameraya gönderiliyor...")
+        self.controller.lbl_status.config(text=f"Plakalar {len(cams)} aktif kameraya gönderiliyor...")
         threading.Thread(target=self.upload_plates_parallel, args=(cams,), daemon=True).start()
 
     def upload_plates_parallel(self, cams):
@@ -818,14 +849,12 @@ class PlateListFrame(ttk.Frame):
         base_url = f"http://{cam['ip']}:{cam['port']}" if cam['port'] else f"http://{cam['ip']}"
         headers = {'Content-Type': 'application/json'}
 
-        # Doğrulanmış tam URL uç noktaları (Önce Postman'de test ettiğiniz kayıt endpoint'i denenecek)
         urls = [
             f"{base_url}/ISAPI/Traffic/channels/1/licensePlateAuditData/record?format=json",
             f"{base_url}/ISAPI/Traffic/channels/1/licensePlateAuditData"
         ]
 
         for plate_no in plates:
-            # Postman'de başarılı olduğunuz JSON şeması
             json_payload = {
                 "LicensePlateInfoList": [
                     {
@@ -845,7 +874,6 @@ class PlateListFrame(ttk.Frame):
 
             for url in urls:
                 try:
-            # PUT metodu ile JSON gönderimi
                     res = requests.put(
                         url, 
                         json=json_payload, 
@@ -879,14 +907,11 @@ class PlateListFrame(ttk.Frame):
         messagebox.showinfo("İşlem Sonucu", "\n".join(summary))
 
     def start_clear_plates_thread(self):
-        cam_frame = self.controller.frames["CameraManagementFrame"]
-        cams = cam_frame.get_selected_camera_list()
-
+        cams = self.get_verified_active_cameras()
         if not cams:
-            messagebox.showwarning("Eksik Bilgi", "Lütfen önce Kamera Yönetimi ekranından kamera seçin.")
             return
 
-        if not messagebox.askyesno("⚠️ Kritik Onay", f"Seçilen {len(cams)} kameradaki TÜM plaka listesi SİLİNECEKTİR!\n\nOnaylıyor musunuz?", icon="warning"):
+        if not messagebox.askyesno("⚠️ Kritik Onay", f"Seçilen {len(cams)} aktif kameradaki TÜM plaka listesi SİLİNECEKTİR!\n\nOnaylıyor musunuz?", icon="warning"):
             return
 
         self.btn_clear.config(state="disabled")
@@ -903,11 +928,8 @@ class PlateListFrame(ttk.Frame):
 
     def clear_single_camera_plates(self, cam):
         base_url = f"http://{cam['ip']}:{cam['port']}" if cam['port'] else f"http://{cam['ip']}"
-        
-        # Arayüzden yakaladığın doğru uç nokta
         url = f"{base_url}/ISAPI/Traffic/channels/1/DelLicensePlateAuditData?format=json"
         
-        # Yakaladığın doğru payload
         payload = {
             "id": [],
             "deleteAllEnabled": True
@@ -918,7 +940,6 @@ class PlateListFrame(ttk.Frame):
             'Accept': 'application/json, text/javascript, */*'
         }
         
-        # Hikvision cihazlarda silme komutları PUT veya POST bekleyebilir, ikisini de deneyelim
         for method in [requests.put, requests.post]:
             try:
                 res = method(
@@ -951,10 +972,29 @@ class VCAFrame(ttk.Frame):
         frame_vca.pack(fill="both", expand=True, pady=5)
 
         self.btn_test_mode = ttk.Button(frame_vca, text="🟢 Canlı Okuma Testini Başlat", command=self.toggle_test_mode)
-        self.btn_test_mode.pack(fill="x", pady=(5, 10))
+        self.btn_test_mode.pack(fill="x", pady=(5, 5))
+
+        # Röle Seçimi ve Kontrol Paneli
+        frame_relay_ops = ttk.Frame(frame_vca)
+        frame_relay_ops.pack(fill="x", pady=5)
+
+        ttk.Label(frame_relay_ops, text="Röle:").pack(side="left", padx=(0, 5))
+        
+        # Röle ID'si için değişken (Varsayılan: 1)
+        self.relay_var = tk.IntVar(value=1)
+        ttk.Radiobutton(frame_relay_ops, text="Röle 1", variable=self.relay_var, value=1).pack(side="left", padx=2)
+        ttk.Radiobutton(frame_relay_ops, text="Röle 2", variable=self.relay_var, value=2).pack(side="left", padx=2)
+
+        # Tetikle Butonu (High)
+        self.btn_trigger_high = ttk.Button(frame_relay_ops, text="⚡ Tetikle", command=lambda: self.start_relay_test_thread("high"))
+        self.btn_trigger_high.pack(side="left", padx=(10, 2), expand=True, fill="x")
+
+        # Tetik Durdur Butonu (Low)
+        self.btn_trigger_low = ttk.Button(frame_relay_ops, text="⏹️ Durdur", command=lambda: self.start_relay_test_thread("low"))
+        self.btn_trigger_low.pack(side="left", padx=(2, 0), expand=True, fill="x")
 
         self.txt_live_test = tk.Text(frame_vca, height=15, width=70, bg=controller.input_bg, fg="#00adb5" if controller.is_dark_theme else "#005f73", font=("Consolas", 10), relief="flat")
-        self.txt_live_test.pack(fill="both", expand=True)
+        self.txt_live_test.pack(fill="both", expand=True, pady=(5, 0))
         self.txt_live_test.insert("1.0", "Test modu kapalı...\n")
         self.txt_live_test.config(state="disabled")
 
@@ -1019,6 +1059,78 @@ class VCAFrame(ttk.Frame):
         self.txt_live_test.config(state="normal")
         self.txt_live_test.insert("1.0", msg)
         self.txt_live_test.config(state="disabled")
+
+    def start_relay_test_thread(self, state_val):
+        """Seçilen kameraların alarm rölesini high veya low yapmak için thread başlatır."""
+        cam_frame = self.controller.frames["CameraManagementFrame"]
+        cams = cam_frame.get_selected_camera_list()
+
+        if not cams:
+            messagebox.showwarning("Eksik Bilgi", "Lütfen önce Kamera Yönetimi ekranından kamera seçin.")
+            return
+
+        active_cams = [cam for cam in cams if cam['ip'] in self.controller.active_cameras]
+        if not active_cams:
+            messagebox.showwarning(
+                "Bağlantı Gerekli", 
+                "Seçilen kameralarla henüz aktif bir bağlantı kurulmamış!\n\n"
+                "Lütfen Kamera Yönetimi ekranından seçtiğiniz kameralara önce **'Bağlan & Test Et'** butonuna basarak bağlanın."
+            )
+            return
+
+        selected_relay = self.relay_var.get()
+        action_name = "Tetikleme (High)" if state_val == "high" else "Tetik Durdurma (Low)"
+        
+        if not messagebox.askyesno("Onay", f"Seçilen {len(active_cams)} aktif kameranın **Röle {selected_relay}** çıkışına {action_name} işlemi uygulanacak.\n\nOnaylıyor musunuz?"):
+            return
+
+        self.btn_trigger_high.config(state="disabled")
+        self.btn_trigger_low.config(state="disabled")
+        self.controller.lbl_status.config(text=f"Kamera Röle {selected_relay} ({action_name}) gönderiliyor...")
+        
+        threading.Thread(target=self.trigger_relay_parallel, args=(active_cams, selected_relay, state_val), daemon=True).start()
+
+    def trigger_relay_parallel(self, cams, relay_id, state_val):
+        summary = []
+        with ThreadPoolExecutor(max_workers=len(cams)) as executor:
+            futures = [executor.submit(self.send_single_relay_trigger, cam, relay_id, state_val) for cam in cams]
+            for future in as_completed(futures):
+                success, ip, msg = future.result()
+                summary.append(f"Kamera ({ip}): {'✅ Başarılı' if success else f'❌ Başarısız ({msg})'}")
+
+        self.after(0, lambda: self.finish_relay_test(summary, relay_id, state_val))
+
+    def send_single_relay_trigger(self, cam, relay_id, state_val):
+        base_url = f"http://{cam['ip']}:{cam['port']}" if cam['port'] else f"http://{cam['ip']}"
+        url = f"{base_url}/ISAPI/System/IO/outputs/{relay_id}/trigger"
+        
+        headers = {
+            'Content-Type': 'application/xml; charset=UTF-8'
+        }
+        
+        xml_payload = f'<?xml version="1.0" encoding="utf-8"?><IOPortData><outputState>{state_val}</outputState></IOPortData>'
+
+        try:
+            res = requests.put(
+                url, 
+                data=xml_payload, 
+                headers=headers, 
+                auth=HTTPDigestAuth(cam['user'], cam['pass']), 
+                timeout=5
+            )
+            if res.status_code in [200, 201]:
+                return True, cam['ip'], "Başarılı"
+            else:
+                return False, cam['ip'], f"Kod: {res.status_code}"
+        except Exception as e:
+            return False, cam['ip'], str(e)
+
+    def finish_relay_test(self, summary, relay_id, state_val):
+        self.btn_trigger_high.config(state="normal")
+        self.btn_trigger_low.config(state="normal")
+        action_text = "High" if state_val == "high" else "Low"
+        self.controller.lbl_status.config(text=f"Röle {relay_id} ({action_text}) işlemi tamamlandı.")
+        messagebox.showinfo(f"Röle {relay_id} Test Sonucu ({action_text})", "\n".join(summary))
 
 
 # --- 4. AYARLAR EKRANI ---
